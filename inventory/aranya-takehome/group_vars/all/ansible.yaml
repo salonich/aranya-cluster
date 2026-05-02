@@ -1,0 +1,5 @@
+# How ansible connects to nodes
+ansible_user: root
+ansible_ssh_private_key_file: ~/.ssh/aranya_id_ed25519
+ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlMaster=no -o ControlPath=none'
+ansible_python_interpreter: /usr/bin/python3
