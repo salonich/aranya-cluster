@@ -19,23 +19,59 @@ A GitOps-managed Kubernetes cluster on three DigitalOcean droplets. Built from c
 
 ## Try it
 
-**Hello page** : http://134.199.196.192 · http://129.212.186.30 · http://134.199.204.141
+### See the public hello page
 
-**Cluster admin access** (using the GPG-encrypted kubeconfig from the email):
+Curl at `http://<NODE-IP>/ to see the page. 
+
+### Get cluster admin access
+
+To get cluster access you need:
+
+1. SSH private key for the cluster nodes.
 
 ```bash
-gpg --decrypt kubeconfig-public.gpg > kubeconfig
+mv /path/to/given/private-key ~/.ssh/aranya_id_ed25519
+chmod 600 ~/.ssh/aranya_id_ed25519
+```
+
+2. The `kubeconfig.gpg` file attached to the email.
+
+3. GPG public keys for the kubeconfig recipients (Sasi and Yoofi). Save each block to a file, then import:
+
+```bash
+# 1. paste each PGP block into its own file, e.g.:
+#      vi /tmp/sasi.asc
+#      vi /tmp/yoofi.asc
+
+# 2. import them into your GPG keyring :
+gpg --import /tmp/sasi.asc /tmp/yoofi.asc
+
+# 3. verify both appear:
+gpg --list-keys sasivarnan619@gmail.com ybquansah@gmail.com
+```
+
+4. Decrypt the GPG file to get the kubeconfig:
+
+```bash
+# from the directory where you saved the .gpg attachment
+gpg --decrypt kubeconfig.gpg > kubeconfig
 export KUBECONFIG=$PWD/kubeconfig
 
-# one-shot health check of everything
-bash <(curl -sSL https://raw.githubusercontent.com/<your-account>/aranya-cluster/main/scripts/verify.sh)
+# one-shot health check of the whole cluster
+bash <(curl -sSL https://raw.githubusercontent.com/salonich/aranya-cluster/main/scripts/verify.sh)
 
 # or just kubectl
 kubectl get nodes
 kubectl -n argocd get applications
 ```
 
-If node1 is unreachable: `kubectl config use-context aranya-via-node2` (or `node3`).
+The kubeconfig has three contexts, one per node IP. If the node it's currently pointing at is unreachable, switch to another:
+
+```bash
+kubectl config use-context aranya-via-node2   # or aranya-via-node3
+```
+
+Same client cert and CA are valid against all three.
 
 ## Repo layout
 
@@ -53,11 +89,12 @@ aranya-cluster/
 
 ## How to reproduce
 
-Every step below has a `make` shortcut — run `make help` to see them. To go end-to-end on a fresh checkout: `make all` runs prereqs through hello-aranya. The detailed steps below are the exact commands behind those targets.
+To go end-to-end on a fresh checkout: `make all` runs prereqs through hello-aranya. The detailed steps below are the exact commands behind those targets.
 
 ### Prerequisites
 
-On the operator machine:
+#### Tools on the operator machine
+
 - python3 ≥ 3.10
 - ansible-core 2.16.x (kubespray release-2.27 requirement)
 - kubectl 1.30+
@@ -71,24 +108,20 @@ curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 |
 curl -LO https://dl.k8s.io/release/v1.31.9/bin/linux/amd64/kubectl && sudo install kubectl /usr/local/bin/
 ```
 
-Three nodes:
+#### Three nodes
+
 - Ubuntu 24.04, ≥2 vCPU, ≥4 GB RAM, ≥50 GB disk
 - Same private VPC subnet
 - SSH key-auth to root
 
-### 1. Set up
-
-Clone the repo. Put the SSH private key outside the repo:
+### 1. Clone the repo and edit the inventory
 
 ```bash
 git clone https://github.com/salonich/aranya-cluster.git
 cd aranya-cluster
-
-mv /path/to/given/private-key ~/.ssh/aranya_id_ed25519
-chmod 600 ~/.ssh/aranya_id_ed25519
 ```
 
-Edit `inventory/aranya-takehome/hosts.yaml` to match your node IPs.
+Edit `inventory/aranya-takehome/hosts.yaml` to match your node IPs (only needed if reproducing on different droplets).
 
 ### 2. Get kubespray
 
@@ -161,9 +194,11 @@ kubectl -n argocd rollout status statefulset/argocd-application-controller
 
 ### 7. Apply ClusterdOS
 
+Apply ClusterdOS manifest and verify all applications get into `HEALTHY` state:
+
 ```bash
 kubectl apply -f apps/clusterdos/install.yaml
-kubectl -n argocd get applications -w   # Ctrl+C when all Synced/Healthy
+kubectl -n argocd get applications 
 ```
 
 Spawns six sub-Applications: `clusterdos-config`, `clusterdos-certmanager`, `clusterdos-metricsserver`, `clusterdos-nfd`, `clusterdos-sealedsecrets`, `clusterdos-vllm`.
@@ -182,32 +217,6 @@ done
 ```
 
 Expect three `HTTP 200` responses.
-
-### 9. Build the multi-context kubeconfig and encrypt for delivery
-
-The repo ships a multi-context kubeconfig at `artifacts/kubeconfig-public` already shaped for delivery (one cluster + context per node). To regenerate from your own admin.conf, copy the same CA and client credentials into three cluster definitions, one per node IP.
-
-Encrypt to recipients (verify fingerprints out-of-band first):
-
-```bash
-gpg --import /path/to/sasi.asc /path/to/yoofi.asc
-
-gpg --trust-model always --encrypt --armor \
-  --recipient sasivarnan619@gmail.com \
-  --recipient ybquansah@gmail.com \
-  --output artifacts/kubeconfig-public.gpg \
-  artifacts/kubeconfig-public
-```
-
-Attach the `.gpg` to the email. To use it:
-
-```bash
-gpg --decrypt kubeconfig-public.gpg > kubeconfig
-export KUBECONFIG=$PWD/kubeconfig
-kubectl get nodes
-# if node1 is unreachable:
-kubectl config use-context aranya-via-node2
-```
 
 ## Decisions
 

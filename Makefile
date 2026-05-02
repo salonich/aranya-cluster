@@ -9,8 +9,11 @@ SHELL              := /usr/bin/env bash
 
 REPO_DIR           := $(shell pwd)
 INVENTORY          := $(REPO_DIR)/inventory/aranya-takehome/hosts.yaml
-ARTIFACTS_DIR      := $(REPO_DIR)/artifacts
-KUBECONFIG_FILE    := $(ARTIFACTS_DIR)/kubeconfig-public
+
+
+KUBECONFIG_FILE    := $(REPO_DIR)/kubeconfig
+ENCRYPTED_FILE     := $(REPO_DIR)/kubeconfig.gpg
+
 SSH_KEY            := $(HOME)/.ssh/aranya_id_ed25519
 
 KUBESPRAY_DIR      := $(REPO_DIR)/kubespray
@@ -41,9 +44,9 @@ help:
 	@echo "make clusterdos    - apply ClusterdOS install.yaml (gitapps sync via Argo)"
 	@echo "make hello         - apply hello-aranya manifests"
 	@echo "make verify        - run end-to-end verify.sh against the cluster"
-	@echo "make encrypt       - GPG-encrypt artifacts/kubeconfig-public for delivery"
+	@echo "make encrypt       - GPG-encrypt ./kubeconfig to ./kubeconfig.gpg for delivery"
 	@echo "make all           - kubespray bring-up to public hello page (no encrypt)"
-	@echo "make clean         - remove local kubespray clone and artifacts/"
+	@echo "make clean         - remove local kubespray clone and decrypted/encrypted kubeconfigs"
 
 .PHONY: all
 all: kubespray swap-off cluster kubeconfig argocd clusterdos hello verify
@@ -59,6 +62,12 @@ kubespray:
 
 .PHONY: ping
 ping:
+	@if [ ! -f $(SSH_KEY) ]; then \
+	  echo "ERROR: SSH private key not found at $(SSH_KEY)"; \
+	  echo "  Save the key (from Aranya's original email) to that path, then chmod 600."; \
+	  exit 1; \
+	fi
+	@chmod 600 $(SSH_KEY)
 	ansible -i $(INVENTORY) all -m ping
 
 .PHONY: swap-off
@@ -77,12 +86,20 @@ reset:
 # ---------- kubectl access ----------
 .PHONY: kubeconfig
 kubeconfig:
-	mkdir -p $(ARTIFACTS_DIR)
-	scp -i $(SSH_KEY) -o StrictHostKeyChecking=accept-new \
-	  root@$(NODE1_PUBLIC):/etc/kubernetes/admin.conf $(ARTIFACTS_DIR)/kubeconfig
-	cp $(ARTIFACTS_DIR)/kubeconfig $(KUBECONFIG_FILE)
-	sed -i 's|server: https://127.0.0.1:6443|server: https://$(NODE1_PUBLIC):6443|' $(KUBECONFIG_FILE)
-	@echo "wrote $(KUBECONFIG_FILE)"
+	@if [ ! -f $(SSH_KEY) ]; then \
+	  echo "ERROR: SSH private key not found at $(SSH_KEY)"; \
+	  echo "  This is the key shared by Aranya in the original email."; \
+	  echo "  Save it to that path, then chmod 600:"; \
+	  echo "    mv /path/to/given/private-key $(SSH_KEY)"; \
+	  echo "    chmod 600 $(SSH_KEY)"; \
+	  exit 1; \
+	fi
+	@chmod 600 $(SSH_KEY)
+	bash $(REPO_DIR)/scripts/build-kubeconfig.sh \
+	  $(SSH_KEY) $(NODE1_PUBLIC) $(NODE2_PUBLIC) $(NODE3_PUBLIC) $(KUBECONFIG_FILE)
+	@echo "current contexts:"
+	@kubectl config get-contexts
+	@echo ""
 	kubectl get nodes
 
 # ---------- platform layer ----------
@@ -117,13 +134,26 @@ verify:
 
 .PHONY: encrypt
 encrypt:
+	@if [ ! -f $(KUBECONFIG_FILE) ]; then \
+	  echo "ERROR: $(KUBECONFIG_FILE) does not exist."; \
+	  echo "  Run 'make kubeconfig' first to fetch it from the cluster."; \
+	  exit 1; \
+	fi
+	@for kid in sasivarnan619@gmail.com ybquansah@gmail.com; do \
+	  if ! gpg --list-keys "$$kid" >/dev/null 2>&1; then \
+	    echo "ERROR: GPG public key for $$kid is not in your keyring."; \
+	    echo "  Save the recipient's PGP block (from the original email) to a file,"; \
+	    echo "  then: gpg --import /path/to/that-key.asc"; \
+	    exit 1; \
+	  fi; \
+	done
 	gpg --trust-model always --encrypt --armor \
 	  $(GPG_RECIPIENTS) \
-	  --output $(ARTIFACTS_DIR)/kubeconfig-public.gpg \
+	  --output $(ENCRYPTED_FILE) \
 	  $(KUBECONFIG_FILE)
-	@echo "encrypted kubeconfig at $(ARTIFACTS_DIR)/kubeconfig-public.gpg (attach to email)"
+	@echo "✓ encrypted kubeconfig at $(ENCRYPTED_FILE) (attach to email)"
 
 # ---------- cleanup ----------
 .PHONY: clean
 clean:
-	rm -rf $(KUBESPRAY_DIR) $(ARTIFACTS_DIR)
+	rm -rf $(KUBESPRAY_DIR) $(KUBECONFIG_FILE) $(ENCRYPTED_FILE)
