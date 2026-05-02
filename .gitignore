@@ -4,12 +4,9 @@
 *_rsa
 id_*
 .ssh/
-kubeconfig
-kubeconfig.*
-admin.conf
+kubeconfig*
 *.kubeconfig
-*.retry
-.vault_pass
+artifacts/
 kubespray/
 *.gpg
 *.asc

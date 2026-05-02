@@ -1,0 +1,20 @@
+---
+# Cluster identity
+cluster_name: aranya-takehome.local
+
+# Networking
+kube_network_plugin: cilium
+kube_proxy_remove: false   # install kube-proxy as a safe fallback
+kube_proxy_mode: iptables
+kube_pods_subnet: 10.233.64.0/18
+kube_service_addresses: 10.233.0.0/18
+
+
+# Cilium-specific
+cilium_hubble_enabled: true
+cilium_hubble_install: true
+cilium_hubble_tls_generate: true
+
+# Cluster-wide niceties
+helm_enabled: true
+metrics_server_enabled: false    # ClusterdOS will install this as a gitapp
