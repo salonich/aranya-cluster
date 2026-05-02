@@ -47,11 +47,14 @@ if [[ $? -ne 0 ]]; then
   fail "Could not list ArgoCD applications"
 else
   echo "$apps_out"
-  unhealthy=$(echo "$apps_out" | awk '$3 != "Healthy" {print $1}')
-  if [[ -z "$unhealthy" ]]; then
-    ok "all ArgoCD applications report Healthy"
+  # Healthy and Progressing are both acceptable — Progressing just means it's
+  # still rolling out (cert-manager often spends a minute here). Only flag
+  # Degraded / Missing / Unknown as actual failures.
+  bad=$(echo "$apps_out" | awk '$3 == "Degraded" || $3 == "Missing" || $3 == "Unknown" {print $1}')
+  if [[ -z "$bad" ]]; then
+    ok "all ArgoCD applications are Healthy or still Progressing"
   else
-    fail "non-Healthy applications: $unhealthy"
+    fail "applications in bad state: $bad"
   fi
 fi
 

@@ -6,17 +6,10 @@ metadata:
   labels:
     app.kubernetes.io/name: vllm
 spec:
-  # Default to 0 because TinyLlama-on-CPU doesn't fit in our 3.8GB nodes — the
-  # container starts and validates config but OOMKills during model load (kubelet
-  # evicts when memory request + actual usage exceeds node available + threshold).
-  # Manifest is deliberately preserved as the gitapp source of truth; scale to 1
-  # on nodes with >= 8GB memory:
-  #   kubectl -n vllm scale deployment vllm --replicas=1
-  # Or fix the fit on small nodes by switching to a pre-quantized INT8 model
-  # (TinyLlama at int8 ~1.1GB, comfortably fits in the 3GB limit).
+  # 0 replicas because TinyLlama doesn't fit in our 3.8GB nodes — see README. Scale to 1 on nodes >= 8GB.
   replicas: 0
   strategy:
-    type: Recreate   # CPU inference is RAM-heavy; avoid running two pods during rollout
+    type: Recreate            # CPU inference is RAM-heavy; don't run two pods during rollout
   selector:
     matchLabels:
       app.kubernetes.io/name: vllm
@@ -25,9 +18,7 @@ spec:
       labels:
         app.kubernetes.io/name: vllm
     spec:
-      # vLLM startup time on CPU is long.
-      # Keep the pod from being killed during init.
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 60   # CPU model load is slow; don't kill mid-startup
       containers:
         - name: vllm
           image: vllm/vllm-openai:v0.6.4.post1
@@ -35,16 +26,16 @@ spec:
           args:
             - "--model=TinyLlama/TinyLlama-1.1B-Chat-v1.0"
             - "--device=cpu"
-            - "--dtype=float16"           # float32 = ~4.4GB for weights alone, won't fit in 3GB; float16 = ~2.2GB
-            - "--swap-space=0"            # vLLM's internal "GPU spillover to CPU" buffer; default 4GB > our entire node, so disable
-            - "--max-model-len=2048"      # cap context to keep RAM usage bounded
-            - "--max-num-seqs=4"          # small batch — CPU can't sustain large concurrency
+            - "--dtype=float16"           # float32 weights = ~4.4GB, won't fit; float16 = ~2.2GB
+            - "--swap-space=0"            # vLLM default 4GB GPU-spillover buffer > our whole node, so disable
+            - "--max-model-len=2048"      # bound RAM usage
+            - "--max-num-seqs=4"          # small batch — CPU can't sustain concurrency
             - "--port=8000"
             - "--host=0.0.0.0"
           env:
-            - name: VLLM_TARGET_DEVICE   # signals the build target if image supports it
+            - name: VLLM_TARGET_DEVICE
               value: cpu
-            - name: HF_HOME              # cache models in writable volume
+            - name: HF_HOME
               value: /cache/huggingface
             - name: HUGGING_FACE_HUB_CACHE
               value: /cache/huggingface
@@ -54,27 +45,23 @@ spec:
               protocol: TCP
           resources:
             requests:
-              # Trimmed from 1 core because per-node CPU is already mostly committed
-              # to control-plane + cilium + system pods on our 2-core droplets.
-              # vLLM CPU inference for TinyLlama is RAM-bound, not CPU-bound, for
-              # small batches — 250m schedulable + burst-to-2 is fine.
-              cpu: 250m
+              cpu: 250m       # control-plane + cilium take most CPU on 2-core nodes
               memory: 2Gi
             limits:
               cpu: "2"
-              memory: 3Gi      # node has 3.8Gi total — leave headroom for the kernel
+              memory: 3Gi     # leave headroom on a 3.8Gi node
           readinessProbe:
             httpGet:
               path: /health
               port: http
             initialDelaySeconds: 120   # CPU model load is slow
             periodSeconds: 10
-            failureThreshold: 60       # be patient — first load can take ~10 min
+            failureThreshold: 60       # first load can take ~10 min
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 600   # don't kill while warming
+            initialDelaySeconds: 600
             periodSeconds: 30
             failureThreshold: 5
           volumeMounts:

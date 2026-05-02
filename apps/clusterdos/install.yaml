@@ -64,22 +64,9 @@ spec:
           nfd:
             enabled: true   # node-feature-discovery — labels nodes with hardware capabilities
 
-          # ----- vLLM as a custom gitapp -----
-          # Why not the built-in `inference` gitapp: clusterdos's `inference` uses
-          # llm-d and is hard-locked to NVIDIA GPU (chart comment: "Requires:
-          # NVIDIA GPU Operator or device plugin"). We're CPU-only, so enabling
-          # `inference: true` would create an Application that endlessly fails to
-          # schedule. Instead, we add vLLM as a CUSTOM gitapp that points at our
-          # own manifests in apps/vllm/ via the chart template's path-based
-          # source mode (the gitapps template supports `path:` in addition to
-          # `chart:`).
-          #
-          # Note on Deployment state: the manifest at apps/vllm/deployment.yaml
-          # ships with replicas: 0 because TinyLlama doesn't fit in our 3.8GB
-          # nodes (~2.2GB float16 weights + runtime overhead OOM-evicts under
-          # the 3GB limit). The gitapp goes Synced/Healthy because a 0-replica
-          # Deployment is valid; bump replicas to 1 manually on nodes >= 8GB or
-          # switch to an INT8-quantized model for the small-node fit.
+          # vLLM as a custom gitapp — built-in `inference` is GPU-locked (llm-d).
+          # Points at our own manifests at apps/vllm/ via path-based source.
+          # Deployment ships with replicas: 0 (won't fit in 3.8GB nodes — see README).
           vllm:
             enabled: true
             namespace: vllm
