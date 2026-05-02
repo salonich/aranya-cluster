@@ -14,19 +14,9 @@ spec:
       labels:
         app.kubernetes.io/name: hello-aranya
     spec:
-      # hostNetwork: pod uses the node's network namespace, binds directly to the
-      # host's NIC. Combined with hostPort: 80 below, every node becomes an entry
-      # point on its own public IP. No Service, no NodePort, no ingress proxy.
-      hostNetwork: true
-      # ClusterFirstWithHostNet: still resolve in-cluster Service names via CoreDNS
-      # even though we're on the host's network. We don't actually need cluster DNS
-      # here (no in-cluster lookups), but this is the correct default to set with
-      # hostNetwork — picks up if we ever do.
-      dnsPolicy: ClusterFirstWithHostNet
-      # All 3 nodes are stacked control-plane + worker. Recent kubespray removes the
-      # control-plane NoSchedule taint when nodes are also workers, but the toleration
-      # is cheap insurance.
-      tolerations:
+      hostNetwork: true                  # bind nginx directly to each node's NIC on port 80
+      dnsPolicy: ClusterFirstWithHostNet # required when hostNetwork is true
+      tolerations:                       # tolerate control-plane taint (we have stacked CP+W nodes)
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
           effect: NoSchedule
@@ -50,8 +40,6 @@ spec:
             httpGet:
               path: /
               port: http
-              # On hostNetwork, kubelet's HTTP probe targets the pod's IP (= host
-              # IP). nginx listens on 0.0.0.0:80 so this resolves correctly.
             periodSeconds: 5
             failureThreshold: 3
           livenessProbe:
@@ -68,10 +56,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              # NET_BIND_SERVICE: bind to privileged port 80
-              # CHOWN/SETGID/SETUID: nginx drops privileges from root to the nginx
-              # user after binding the port; needs these to chown its working dirs.
-              add: ["NET_BIND_SERVICE", "CHOWN", "SETGID", "SETUID"]
+              add: ["NET_BIND_SERVICE", "CHOWN", "SETGID", "SETUID"]   # nginx needs these to bind :80 then drop to nginx user
       volumes:
         - name: index-html
           configMap:

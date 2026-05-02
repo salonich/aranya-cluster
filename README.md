@@ -47,12 +47,13 @@ aranya-cluster/
 │   ├── hello-aranya/                        # public nginx
 │   ├── clusterdos/install.yaml              # one Argo Application bootstrapping all gitapps
 │   └── vllm/                                # TinyLlama deployment
-└── artifacts/                               # gitignored; kubeconfig lives here locally
 ```
 
 ---
 
 ## How to reproduce
+
+Every step below has a `make` shortcut — run `make help` to see them. To go end-to-end on a fresh checkout: `make all` runs prereqs through hello-aranya. The detailed steps below are the exact commands behind those targets.
 
 ### Prerequisites
 
@@ -158,9 +159,7 @@ kubectl -n argocd rollout status deploy/argocd-repo-server
 kubectl -n argocd rollout status statefulset/argocd-application-controller
 ```
 
-### 7. Apply ClusterdOS (installs cert-manager, metrics-server, NFD, sealed-secrets, vLLM)
-
-Before applying, edit the `vllm` gitapp's `repoURL:` in `apps/clusterdos/install.yaml` to point at YOUR public fork of this repo (the gitapp uses path-based source pointing at `apps/vllm/` in your repo).
+### 7. Apply ClusterdOS
 
 ```bash
 kubectl apply -f apps/clusterdos/install.yaml
@@ -169,22 +168,20 @@ kubectl -n argocd get applications -w   # Ctrl+C when all Synced/Healthy
 
 Spawns six sub-Applications: `clusterdos-config`, `clusterdos-certmanager`, `clusterdos-metricsserver`, `clusterdos-nfd`, `clusterdos-sealedsecrets`, `clusterdos-vllm`.
 
-- `metricsserver` and `sealedsecrets` settle at `OutOfSync/Healthy` — both controllers self-mutate at runtime (sealed-secrets rotates its key Secret; metrics-server's APIService gets `availabilityCondition` set by the kube-aggregator). Drift is expected, not a failure.
-- `clusterdos-vllm` syncs `Synced/Healthy` because the Deployment ships with `replicas: 0` (won't fit in 3.8GB nodes — see Known limitations). Manifest lives in `apps/vllm/`; ArgoCD pulls from your repo and applies it.
-
 ### 8. Apply hello-aranya
 
 ```bash
 kubectl apply -k apps/hello-aranya/
 kubectl -n hello-aranya rollout status daemonset/hello-aranya
 
-# verify all 3 public IPs serve
+
+# Verify traffic working
 for ip in <node1-ip> <node2-ip> <node3-ip>; do
   curl -sS -o /dev/null -w "$ip → HTTP %{http_code}\n" http://$ip
 done
 ```
 
-Three `HTTP 200` lines.
+Expect three `HTTP 200` responses.
 
 ### 9. Build the multi-context kubeconfig and encrypt for delivery
 
@@ -214,29 +211,29 @@ kubectl config use-context aranya-via-node2
 
 ## Decisions
 
-1. **Stacked control-plane + worker on all 3 nodes.** 3-node etcd quorum survives any single node loss; splitting roles on 3 nodes wastes hardware and creates a single-CP SPOF.
+1. Every node runs as both a control plane and a worker. With only 3 nodes, splitting roles would have wasted hardware and left one server doing all the cluster-management work — if it died, nothing in the cluster could schedule new pods or change anything. Stacking gives us etcd quorum: as long as any 2 of the 3 nodes are alive, the cluster keeps working.
 
-2. **Cilium CNI with kube-proxy kept alongside.** Cilium for the eBPF datapath; kube-proxy stays as a Service-routing fallback and gives `iptables-save` / `ipvsadm` as a debugging surface even when both layers are healthy.
+2. Cilium is the cluster's networking layer. It handles pod-to-pod traffic and network policies using eBPF, which is faster and more observable than the older iptables approach. We left kube-proxy installed alongside it as a safety net. If Cilium ever has a config regression in how it routes Services, kube-proxy's iptables rules still work, and you can run `iptables-save` to see what the kernel thinks should happen. Removing kube-proxy would have been cleaner on paper but gives up that fallback for almost no real benefit at our scale.
 
-3. **Cluster traffic bound to the private VPC.** `ip` and `access_ip` point at `10.128.0.x`; public NICs only carry SSH and external ingress. Smaller attack surface, no inter-node egress cost.
+3. All cluster-internal traffic — kubelet talking to apiserver, pod talking to pod, etcd between members — runs over the private network at 10.128.0.x. The public NICs on the nodes only carry SSH and the hello-aranya page. This shrinks the attack surface and avoids charging inter-node packets as public egress.
 
-4. **Per-node localhost API LB, not a floating VIP.** Tried kube-vip ARP first — DigitalOcean's VPC silently filters ARP for IPs not officially assigned to a droplet, so the GARPs were blackholed. Switched to kubespray's per-node nginx LB (kubelet talks to `127.0.0.1:6443`). Real-prod answer: DO Cloud Controller Manager + a `Service: LoadBalancer`.
+4. There's no single floating IP for the API. The first attempt used kube-vip in ARP mode advertising a private virtual IP. Clean idea, but the cloud's private network silently drops ARP responses for IPs that weren't officially assigned to a node (a common anti-spoofing default in cloud VPCs). The other two nodes never learned the VIP existed. We switched to the pattern kubespray ships by default: each node runs a tiny local nginx that knows how to reach all 3 apiservers, and kubelet just talks to `127.0.0.1:6443`. If one apiserver dies, the local nginx fails over to another. The proper production fix would be a real cloud load balancer in front of the API, but that costs money and needs an API token.
 
-5. **Multi-context kubeconfig for delivery.** kubectl has no built-in failover between server URLs. Three contexts let recipients flip with `kubectl config use-context aranya-via-node{1,2,3}` if a node dies. Cert SANs cover all 3 public IPs.
+5. The kubeconfig delivered by email has three contexts, one per node IP. kubectl can only point at one server URL at a time and has no built-in failover between alternatives. With three contexts, the recipient can switch with one command (`kubectl config use-context aranya-via-node2`) if a node is unreachable. The same client cert and CA work against all three because the API cert SANs include every public node IP — kubespray pulled them from the inventory's `access_ip` entries.
 
-6. **No ingress controller for hello-aranya — DaemonSet on hostNetwork instead.** One static page doesn't need a Layer-7 router. NGINX Gateway Fabric (Gateway API) the moment a real domain or second service appears.
+6. The hello-aranya page doesn't sit behind an ingress controller. An ingress controller is useful when you have multiple services to route between or want to terminate TLS in one place; for a single static page it would just be nginx in front of nginx. Instead, the page is served by a DaemonSet running with `hostNetwork: true` so each pod binds directly to its node's port 80. If a real domain or a second service shows up, a Gateway-API implementation goes in front then.
 
-7. **ArgoCD installed directly, not via ClusterdOS.** ClusterdOS bootstraps AS an Argo Application — something has to install ArgoCD first. Pinned upstream manifest, one shot.
+7. ArgoCD was installed by hand using its upstream pinned manifest, not via ClusterdOS. The reason is bootstrap order: ClusterdOS itself ships as an ArgoCD Application, so something has to install ArgoCD before ClusterdOS can sync. One `kubectl apply` of the official manifest, then ArgoCD takes over from there.
 
-8. **sealed-secrets as the optional gitapp.** Extends "nothing sensitive in the public repo" to runtime — encrypted Secret manifests can live in git, only the in-cluster controller can decrypt.
+8. The optional extra gitapp is sealed-secrets. It lets us commit encrypted Kubernetes Secret manifests directly to the public git repo; only the in-cluster controller (which holds a private key generated at install time) can decrypt them. The result is that the entire cluster state — including secrets — could live in git without leaking anything to a reader of the public repo. Tiny footprint, fits the security posture set elsewhere.
 
-9. **vLLM as a custom gitapp, not the built-in `inference` one.** Built-in `inference` is GPU-locked (uses llm-d). Added vLLM via the gitapps template's path-based source mode pointing at `apps/vllm/`. Same GitOps discipline, our own CPU-friendly Deployment.
+9. vLLM is installed as a custom gitapp added to ClusterdOS, not via ClusterdOS's built-in `inference` gitapp. The built-in one is hard-locked to NVIDIA GPU (it uses llm-d, which requires the GPU operator) and our cluster is CPU-only — enabling it would have created an Application that endlessly fails to schedule. Instead, we wrote our own vLLM Deployment in `apps/vllm/` and added a custom gitapp pointing at it using the chart's path-based source mode. Same GitOps discipline as the built-in catalog, just with CPU-friendly args.
 
-10. **metrics-server `--kubelet-insecure-tls`.** kubespray-installed kubelet TLS certs don't include node IPs in SANs, so metrics-server's IP-based validation fails. Real-prod fix: `kubelet_rotate_server_certificates: true` and drop the flag.
+10. metrics-server runs with `--kubelet-insecure-tls`. The reason: kubespray-installed kubelets serve TLS using self-signed certificates whose SAN list doesn't include the node's IP. metrics-server tries to scrape kubelets by IP, fails the cert handshake, and never goes Ready. The flag tells metrics-server to skip that verification step. In real production you'd instead set `kubelet_rotate_server_certificates: true` in kubespray so the kubelets serve certs signed by the cluster CA, then drop the flag.
 
-11. **SSH multiplexing disabled in ansible.** Zombie-socket hangs hit three times during install. `ControlMaster=no` + `ServerAliveInterval=30` trades per-task latency for connection reliability.
+11. Ansible is configured to disable SSH connection multiplexing (`ControlMaster=no`, `ControlPath=none`, `ServerAliveInterval=30`). During the cluster install we hit zombie-socket failures three separate times — the SSH process was alive, but the underlying TCP connection had been silently dropped by some intermediary, so ansible just hung waiting on a dead socket. Each task now opens a fresh SSH connection. Slightly slower per task, but no more zombies.
 
-12. **SSH key never committed.** Lives at `~/.ssh/aranya_id_ed25519`, referenced by absolute path. `.gitignore` blocks key patterns and the entire `artifacts/` dir.
+12. The SSH private key for the cluster nodes is never committed. It lives at `~/.ssh/aranya_id_ed25519` on the operator machine and is referenced by absolute path in the ansible config. The `.gitignore` blocks every common key pattern (`*.pem`, `*.key`, `id_*`, `*_ed25519`) and the entire `artifacts/` directory where local kubeconfigs live.
 
 ---
 
@@ -251,39 +248,34 @@ vLLM container starts and validates config (we passed `--device=cpu`, `--swap-sp
 - vLLM runtime + tokenizer + KV cache: ~700-900 MB
 - Total > 3 GB → kubelet evicts the pod when the node hits its eviction threshold
 
-This is a node-size constraint, not a config bug. The Deployment manifest is correct. Scale back up on nodes ≥ 8 GB and it'll work:
+This is a node-size constraint.
 
 ```bash
 kubectl -n vllm scale deployment vllm --replicas=1
 ```
 
-To make it fit on the current nodes: try INT8 quantization (TinyLlama at int8 ~1.1 GB, would fit) by switching to a pre-quantized model and adding `--quantization=gptq`. Not done in this delivery to protect the runbook timeline.
-
 ### Hubble UI attempted, scope-cut
 
-Tried to add Hubble UI as a second optional gitapp by pointing at the cilium chart with everything-but-Hubble disabled (`agent: false`, `operator.enabled: false`, etc., plus `hubble.relay.enabled: true` and `hubble.ui.enabled: true`). The chart deployed cleanly without conflicting with the kubespray-managed Cilium agent — but `hubble-relay` crash-looped because kubespray's cilium agent runs with **Hubble disabled at the agent level**:
+Tried to add Hubble UI as a second optional gitapp by pointing at the cilium chart with everything-but-Hubble disabled (`agent: false`, `operator.enabled: false`, etc., plus `hubble.relay.enabled: true` and `hubble.ui.enabled: true`). The chart deployed cleanly without conflicting with the kubespray-managed Cilium agent — but `hubble-relay` crash-looped because kubespray's cilium agent runs with Hubble disabled at the agent level:
 
 ```
 $ kubectl -n kube-system exec ds/cilium -- cilium status | grep -i hubble
 Hubble:                  Disabled
 ```
 
-The `cilium_hubble_*` group_vars I set don't appear to be the canonical names in kubespray release-2.27, so the cilium ConfigMap was generated without `enable-hubble: "true"`. Without Hubble at the agent level, no `hubble-peer` Service exists and the chart-deployed relay has nothing to talk to.
-
-Proper fix: `grep -rE hubble kubespray/roles/network_plugin/cilium/defaults` to find the canonical var names, update `inventory/aranya-takehome/group_vars/k8s_cluster/k8s-cluster.yaml`, re-run `cluster.yml`. Then flip `hubbleui.enabled: true` in `apps/clusterdos/install.yaml` — the gitapp YAML is preserved with `enabled: false` so it's a one-line revert.
+The `cilium_hubble_*` group_vars I set don't appear to be the canonical names in kubespray release-2.27, so the cilium ConfigMap was generated without `enable-hubble: "true"`. Without Hubble at the agent level, no `hubble-peer` Service exists and the chart-deployed relay has nothing to talk to. I would have needed to re-run cluster generation using KubeSpray which i avoided due to time limitations.
 
 ---
 
 ## What I'd do with more time
 
-- **Real load balancers** in front of both the API (currently per-node, multi-context kubeconfig as workaround) and hello-aranya (currently 3 published public IPs). DO Cloud Controller Manager + `Service: LoadBalancer`.
-- **Fix Hubble UI** — find the right kubespray vars, re-run, flip the gitapp.
-- **vLLM CPU image baked in CI** with INT8 quantization to actually serve on small nodes.
-- **NetworkPolicies** — default-deny in every workload namespace, ReferenceGrants for cross-namespace flows.
-- **Real TLS** for hello-aranya via cert-manager + Let's Encrypt once a real DNS name is in play.
-- **CI smoke tests** — a workflow that runs the end-to-end checks above against the running cluster.
-- **Backups** — Velero + DO Spaces.
-- **A Makefile** wrapping the runbook commands so reproduction is `make recon && make cluster && make platform && make hello`.
+- A real load balancer in front of the API (so kubectl gets one stable endpoint instead of relying on the multi-context kubeconfig) and another in front of hello-aranya (so the page has one entry point instead of three published node IPs). On any cloud, this is the cloud controller manager plus a `Service: LoadBalancer`.
+- Make Hubble UI actually work. The blocker was a kubespray variable name that didn't match the version we used; finding the right one and re-running the playbook would unblock it.
+- A vLLM image built for CPU with quantized weights, so the workload actually fits on small nodes instead of being deployed at zero replicas.
+- Network policies. Default-deny in every workload namespace, with explicit allow rules for the cross-namespace flows we actually want.
+- Real TLS for the hello-aranya page (cert-manager plus a real domain name and a public certificate authority).
+- A small CI pipeline that runs the verify script against the running cluster on every push and fails the build on regressions.
+- Cluster backups for state and persistent volumes, stored in cheap object storage.
 
 ---
 
