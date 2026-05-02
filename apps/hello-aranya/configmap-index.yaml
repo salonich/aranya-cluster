@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hello-aranya-index
+  namespace: hello-aranya
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <title>hello aranya</title>
+      <style>
+        * { box-sizing: border-box; }
+
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          margin: 0;
+          color: #e2e8f0;
+          overflow: hidden;
+          background: linear-gradient(-45deg, #0f172a, #1e293b, #312e81, #0f172a);
+          background-size: 400% 400%;
+          animation: gradientShift 15s ease infinite;
+        }
+
+        @keyframes gradientShift {
+          0%   { background-position: 0% 50%; }
+          50%  { background-position: 100% 50%; }
+          100% { background-position: 0% 50%; }
+        }
+
+        /* floating blurred orbs */
+        .orb {
+          position: fixed;
+          border-radius: 50%;
+          filter: blur(60px);
+          opacity: 0.35;
+          pointer-events: none;
+          animation: float 12s ease-in-out infinite;
+        }
+        .orb.a { width: 320px; height: 320px; background: #6366f1; top: 10%;  left: 8%;  animation-delay: 0s;  }
+        .orb.b { width: 260px; height: 260px; background: #ec4899; bottom: 12%; right: 10%; animation-delay: -4s; }
+        .orb.c { width: 200px; height: 200px; background: #06b6d4; top: 50%;  left: 50%;  animation-delay: -8s; }
+
+        @keyframes float {
+          0%, 100% { transform: translate(0, 0) scale(1); }
+          33%      { transform: translate(40px, -30px) scale(1.1); }
+          66%      { transform: translate(-30px, 40px) scale(0.95); }
+        }
+
+        .card {
+          text-align: center;
+          padding: 2rem;
+          position: relative;
+          z-index: 1;
+          animation: fadeUp 1.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+        }
+
+        @keyframes fadeUp {
+          from { opacity: 0; transform: translateY(20px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+
+        h1 {
+          font-size: 4rem;
+          font-weight: 200;
+          margin: 0 0 0.5rem 0;
+          letter-spacing: -0.02em;
+          background: linear-gradient(120deg, #e2e8f0, #818cf8, #f0abfc, #e2e8f0);
+          background-size: 300% 100%;
+          -webkit-background-clip: text;
+          background-clip: text;
+          -webkit-text-fill-color: transparent;
+          animation: shimmer 6s linear infinite;
+        }
+
+        @keyframes shimmer {
+          0%   { background-position: 0% 50%; }
+          100% { background-position: 300% 50%; }
+        }
+
+        .sub {
+          color: #94a3b8;
+          font-size: 0.9rem;
+          margin-top: 1rem;
+          animation: fadeUp 1.2s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
+        }
+
+        .signature {
+          margin-top: 2.5rem;
+          font-size: 1.1rem;
+          color: #c7d2fe;
+          font-weight: 300;
+          letter-spacing: 0.05em;
+          opacity: 0;
+          animation: fadeIn 0.6s ease 2s forwards;
+        }
+
+        .signature .typed {
+          display: inline-block;
+          overflow: hidden;
+          white-space: nowrap;
+          border-right: 2px solid #818cf8;
+          width: 0;
+          vertical-align: bottom;
+          animation:
+            typing 2s steps(15, end) 2.2s forwards,
+            blink 0.8s step-end infinite 2.2s;
+        }
+
+        @keyframes typing { from { width: 0; } to { width: 14ch; } }
+        @keyframes blink  { 50% { border-color: transparent; } }
+        @keyframes fadeIn { to { opacity: 1; } }
+
+        .wave { display: inline-block; animation: wave 1.6s ease-in-out infinite; transform-origin: 70% 70%; }
+        @keyframes wave {
+          0%, 60%, 100% { transform: rotate(0deg); }
+          10%, 30%      { transform: rotate(14deg); }
+          20%           { transform: rotate(-8deg); }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="orb a"></div>
+      <div class="orb b"></div>
+      <div class="orb c"></div>
+
+      <div class="card">
+        <h1>Hello Aranya</h1>
+        <div class="sub">served from a 3-node Kubernetes cluster on DigitalOcean droplets</div>
+        <div class="signature">
+          <span class="typed">Hi from Saloni <span class="wave">👋</span></span>
+        </div>
+      </div>
+    </body>
+    </html>

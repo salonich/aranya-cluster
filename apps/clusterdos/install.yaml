@@ -1,0 +1,112 @@
+---
+# ClusterdOS bootstrap.
+#
+# Apply this once (kubectl apply -f apps/clusterdos/install.yaml). It creates a
+# single ArgoCD Application that points at clusterdOS's `metadeployment` Helm
+# chart. That chart reads our `gitapps:` map below and creates one ArgoCD
+# sub-Application per enabled gitapp, each pointing at its own Helm chart.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: clusterdos
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  destination:
+    name: in-cluster
+    namespace: argocd
+  project: default
+  syncPolicy:
+    automated:
+      prune: true
+      allowEmpty: true
+      selfHeal: true
+    syncOptions:
+      - RespectIgnoreDifferences=true
+      - CreateNamespace=true
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true
+      - ServerSideApply=true
+  source:
+    repoURL: 'https://gitlab.com/aranya-tech/public/clusterdOS.git'
+    path: metadeployment/
+    targetRevision: v0.3.16
+    helm:
+      valuesObject:
+        clusterdos:
+          # Required. Used as a shared identifier across gitapps via YAML anchors.
+          clustername: aranya-takehome
+          ref: v0.3.16
+
+        gitapps:
+          # ----- Required by the assignment -----
+          certmanager:
+            enabled: true   # TLS automation; chart defaults from metadeployment
+
+          metricsserver:
+            enabled: true   # enables `kubectl top`
+            values:
+              # kubespray-installed kubelets serve TLS with self-signed certs that
+              # don't include the node's IP in their SAN list. metrics-server
+              # validates by IP, so default verification fails with x509 errors.
+              # --kubelet-insecure-tls skips that check. Acceptable for this
+              # takehome; in real production set kubespray's
+              # `kubelet_rotate_server_certificates: true` so kubelets serve certs
+              # signed by the cluster CA, then drop this flag.
+              defaultArgs:
+                - --cert-dir=/tmp
+                - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+                - --kubelet-use-node-status-port
+                - --metric-resolution=15s
+                - --kubelet-insecure-tls
+
+          nfd:
+            enabled: true   # node-feature-discovery — labels nodes with hardware capabilities
+
+          # vLLM as a custom gitapp — built-in `inference` is GPU-locked (llm-d).
+          # Points at our own manifests at apps/vllm/ via path-based source.
+          # Deployment ships with replicas: 0 (won't fit in 3.8GB nodes — see README).
+          vllm:
+            enabled: true
+            namespace: vllm
+            # Replace with the actual public GitHub URL of THIS repo before applying.
+            repoURL: 'https://github.com/salonich/aranya-cluster.git'
+            targetRevision: main
+            path: apps/vllm/
+            automated: true
+            syncWave: 3
+
+          # The built-in inference gitapp stays disabled — see vllm: above for why.
+          inference:
+            enabled: false
+
+          # ----- Optional gitapp #1: sealed-secrets -----
+          # Why: extends our "nothing sensitive in the public repo" stance to
+          # runtime. With sealed-secrets, we can commit encrypted Secret manifests
+          # to git; the controller decrypts them in-cluster using a private key
+          # only the controller holds. The public repo can hold the entire
+          # cluster state, including secrets, with nothing useful to a reader.
+          sealedsecrets:
+            enabled: true
+            namespace: clusterdos-sealed-secrets
+            repoURL: 'https://bitnami-labs.github.io/sealed-secrets'
+            chart: sealed-secrets
+            targetRevision: '2.16.2'
+            automated: true
+            syncWave: 1
+            values:
+              fullnameOverride: sealed-secrets-controller   # canonical name expected by `kubeseal` CLI
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+
+          # Hubble UI was attempted as a second optional gitapp; removed because
+          # kubespray-managed cilium agents have Hubble disabled at the agent level
+          # in release-2.27 (var-name mismatch). Full writeup in README's Known
+          # limitations. To re-add: use the cilium chart with everything-but-hubble
+          # disabled, after enabling Hubble at the agent level via kubespray.

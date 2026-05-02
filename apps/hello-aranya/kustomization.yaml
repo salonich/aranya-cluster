@@ -1,0 +1,7 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: hello-aranya
+resources:
+  - namespace.yaml
+  - configmap-index.yaml
+  - daemonset.yaml

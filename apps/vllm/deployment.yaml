@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: vllm
+  labels:
+    app.kubernetes.io/name: vllm
+spec:
+  # 0 replicas because TinyLlama doesn't fit in our 3.8GB nodes — see README. Scale to 1 on nodes >= 8GB.
+  replicas: 0
+  strategy:
+    type: Recreate            # CPU inference is RAM-heavy; don't run two pods during rollout
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm
+    spec:
+      terminationGracePeriodSeconds: 60   # CPU model load is slow; don't kill mid-startup
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.6.4.post1
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--model=TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+            - "--device=cpu"
+            - "--dtype=float16"           # float32 weights = ~4.4GB, won't fit; float16 = ~2.2GB
+            - "--swap-space=0"            # vLLM default 4GB GPU-spillover buffer > our whole node, so disable
+            - "--max-model-len=2048"      # bound RAM usage
+            - "--max-num-seqs=4"          # small batch — CPU can't sustain concurrency
+            - "--port=8000"
+            - "--host=0.0.0.0"
+          env:
+            - name: VLLM_TARGET_DEVICE
+              value: cpu
+            - name: HF_HOME
+              value: /cache/huggingface
+            - name: HUGGING_FACE_HUB_CACHE
+              value: /cache/huggingface
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 250m       # control-plane + cilium take most CPU on 2-core nodes
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi     # leave headroom on a 3.8Gi node
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 120   # CPU model load is slow
+            periodSeconds: 10
+            failureThreshold: 60       # first load can take ~10 min
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 600
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: model-cache
+              mountPath: /cache
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: model-cache
+          emptyDir:
+            sizeLimit: 5Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
