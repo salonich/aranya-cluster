@@ -1,0 +1,17 @@
+*.pem
+*.key
+*_ed25519
+*_rsa
+id_*
+.ssh/
+kubeconfig
+kubeconfig.*
+admin.conf
+*.kubeconfig
+*.retry
+.vault_pass
+kubespray/
+*.gpg
+*.asc
+secrets/
+.DS_Store
