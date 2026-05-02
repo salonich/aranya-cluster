@@ -1,4 +1,4 @@
-# Aranya take-home — 3-node Kubernetes cluster
+# 3-node Kubernetes cluster
 
 A GitOps-managed Kubernetes cluster on three DigitalOcean droplets. Built from cold metal with kubespray, then ArgoCD installs ClusterdOS, which installs the platform apps. A public nginx page serves "hello aranya" from every node.
 
