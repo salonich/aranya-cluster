@@ -121,7 +121,7 @@ git clone https://github.com/salonich/aranya-cluster.git
 cd aranya-cluster
 ```
 
-Edit `inventory/aranya-takehome/hosts.yaml` to match your node IPs (only needed if reproducing on different droplets).
+Edit `inventory/aranya-takehome/hosts.yaml` to match your node IPs.
 
 ### 2. Get kubespray
 
@@ -161,7 +161,7 @@ ssh -i ~/.ssh/aranya_id_ed25519 root@<NODE_IP> \
   'systemctl stop containerd && rm -rf /var/lib/containerd/io.containerd.content.v1.content/ingest/* && systemctl start containerd'
 ```
 
-Then re-run `cluster.yml` — kubespray is idempotent.
+Then re-run `cluster.yml`, it will pick back up from the last process installed since kubespray is idempotent.
 
 ### 5. Get the kubeconfig
 
@@ -220,29 +220,27 @@ Expect three `HTTP 200` responses.
 
 ## Decisions
 
-1. Every node runs as both a control plane and a worker. With only 3 nodes, splitting roles would have wasted hardware and left one server doing all the cluster-management work — if it died, nothing in the cluster could schedule new pods or change anything. Stacking gives us etcd quorum: as long as any 2 of the 3 nodes are alive, the cluster keeps working.
+1. Every node runs as both a control plane and a worker. With only 3 nodes, splitting roles would have wasted hardware and left one server doing all the cluster-management work and if it dies, nothing in the cluster could schedule new pods or change anything. Stacking gives us etcd quorum: as long as any 2 of the 3 nodes are alive, the cluster keeps working.
 
-2. Cilium is the cluster's networking layer. It handles pod-to-pod traffic and network policies using eBPF, which is faster and more observable than the older iptables approach. We left kube-proxy installed alongside it as a safety net. If Cilium ever has a config regression in how it routes Services, kube-proxy's iptables rules still work, and you can run `iptables-save` to see what the kernel thinks should happen. Removing kube-proxy would have been cleaner on paper but gives up that fallback for almost no real benefit at our scale.
+2. Cilium is the cluster's networking layer. It handles pod-to-pod traffic and network policies using eBPF, which is faster and more observable than the older iptables approach. We left kube-proxy installed alongside it as a safety net. If Cilium ever fails for any reason, kube-proxy's iptables rules still work. Removing kube-proxy would have been cleaner on paper but gives up that fallback for almost no real benefit at our scale.
 
-3. All cluster-internal traffic — kubelet talking to apiserver, pod talking to pod, etcd between members — runs over the private network at 10.128.0.x. The public NICs on the nodes only carry SSH and the hello-aranya page. This shrinks the attack surface and avoids charging inter-node packets as public egress.
+3. All cluster-internal traffic like kubelet talking to apiserver, pod talking to pod, etcd between members runs over the private network at 10.128.0.x. The public NICs on the nodes only carry SSH and the hello-aranya page. This shrinks the attack surface and avoids charging inter-node packets as public egress.
 
-4. There's no single floating IP for the API. The first attempt used kube-vip in ARP mode advertising a private virtual IP. Clean idea, but the cloud's private network silently drops ARP responses for IPs that weren't officially assigned to a node (a common anti-spoofing default in cloud VPCs). The other two nodes never learned the VIP existed. We switched to the pattern kubespray ships by default: each node runs a tiny local nginx that knows how to reach all 3 apiservers, and kubelet just talks to `127.0.0.1:6443`. If one apiserver dies, the local nginx fails over to another. The proper production fix would be a real cloud load balancer in front of the API, but that costs money and needs an API token.
+4. There's no single floating IP for the API. The first attempt was to use `kube-vip` in ARM mode to achieve that but the cloud's private network silently drops ARP responses for IPs that weren't officially assigned to a node (a common anti-spoofing default in cloud VPCs). The other two nodes never learned the VIP existed. We switched to the pattern kubespray ships by default: each node runs a tiny local nginx that knows how to reach all 3 apiservers, and kubelet just talks to `127.0.0.1:6443`. If one apiserver dies, the local nginx fails over to another. The proper production fix would be a real cloud load balancer in front of the API, but that costs money and needs an API token.
 
-5. The kubeconfig delivered by email has three contexts, one per node IP. kubectl can only point at one server URL at a time and has no built-in failover between alternatives. With three contexts, the recipient can switch with one command (`kubectl config use-context aranya-via-node2`) if a node is unreachable. The same client cert and CA work against all three because the API cert SANs include every public node IP — kubespray pulled them from the inventory's `access_ip` entries.
+5. The kubeconfig delivered by email has three contexts, one per node IP. kubectl can only point at one server URL at a time and has no built-in failover between alternatives. With three contexts, the recipient can switch with one command (`kubectl config use-context aranya-via-node2`) if a node is unreachable. The same client cert and CA work against all three because the API cert SANs include every public node IP that kubespray pulled from the inventory's `access_ip` entries.
 
 6. The hello-aranya page doesn't sit behind an ingress controller. An ingress controller is useful when you have multiple services to route between or want to terminate TLS in one place; for a single static page it would just be nginx in front of nginx. Instead, the page is served by a DaemonSet running with `hostNetwork: true` so each pod binds directly to its node's port 80. If a real domain or a second service shows up, a Gateway-API implementation goes in front then.
 
-7. ArgoCD was installed by hand using its upstream pinned manifest, not via ClusterdOS. The reason is bootstrap order: ClusterdOS itself ships as an ArgoCD Application, so something has to install ArgoCD before ClusterdOS can sync. One `kubectl apply` of the official manifest, then ArgoCD takes over from there.
+7. ArgoCD was installed using its upstream pinned manifest, not via ClusterdOS. The reason is bootstrap order: ClusterdOS itself ships as an ArgoCD Application, so something has to install ArgoCD before ClusterdOS can sync. One `kubectl apply` of the official manifest, then ArgoCD takes over from there.
 
-8. The optional extra gitapp is sealed-secrets. It lets us commit encrypted Kubernetes Secret manifests directly to the public git repo; only the in-cluster controller (which holds a private key generated at install time) can decrypt them. The result is that the entire cluster state — including secrets — could live in git without leaking anything to a reader of the public repo. Tiny footprint, fits the security posture set elsewhere.
+8. The optional extra gitapp is `sealed-secrets`. It lets us commit encrypted Kubernetes Secret manifests directly to the public git repo; only the in-cluster controller can decrypt them. The result is that the entire cluster state including secrets could live in git without leaking anything to a reader of the public repo.
 
-9. vLLM is installed as a custom gitapp added to ClusterdOS, not via ClusterdOS's built-in `inference` gitapp. The built-in one is hard-locked to NVIDIA GPU (it uses llm-d, which requires the GPU operator) and our cluster is CPU-only — enabling it would have created an Application that endlessly fails to schedule. Instead, we wrote our own vLLM Deployment in `apps/vllm/` and added a custom gitapp pointing at it using the chart's path-based source mode. Same GitOps discipline as the built-in catalog, just with CPU-friendly args.
+9. vLLM is installed as a custom gitapp added to ClusterdOS, not via ClusterdOS's built-in `inference` gitapp. The built-in one is hard-locked to NVIDIA GPU (it uses llm-d, which requires the GPU operator) and our cluster is CPU-only so enabling it would have created an Application that endlessly fails to schedule. Instead, we wrote our own vLLM Deployment in `apps/vllm/` and added a custom gitapp pointing at it using the chart's path-based source mode.
 
 10. metrics-server runs with `--kubelet-insecure-tls`. The reason: kubespray-installed kubelets serve TLS using self-signed certificates whose SAN list doesn't include the node's IP. metrics-server tries to scrape kubelets by IP, fails the cert handshake, and never goes Ready. The flag tells metrics-server to skip that verification step. In real production you'd instead set `kubelet_rotate_server_certificates: true` in kubespray so the kubelets serve certs signed by the cluster CA, then drop the flag.
 
-11. Ansible is configured to disable SSH connection multiplexing (`ControlMaster=no`, `ControlPath=none`, `ServerAliveInterval=30`). During the cluster install we hit zombie-socket failures three separate times — the SSH process was alive, but the underlying TCP connection had been silently dropped by some intermediary, so ansible just hung waiting on a dead socket. Each task now opens a fresh SSH connection. Slightly slower per task, but no more zombies.
-
-12. The SSH private key for the cluster nodes is never committed. It lives at `~/.ssh/aranya_id_ed25519` on the operator machine and is referenced by absolute path in the ansible config. The `.gitignore` blocks every common key pattern (`*.pem`, `*.key`, `id_*`, `*_ed25519`) and the entire `artifacts/` directory where local kubeconfigs live.
+12. The sensitive keys and configs are in `.gitignore` to avoid sensitive information leak. 
 
 ---
 
